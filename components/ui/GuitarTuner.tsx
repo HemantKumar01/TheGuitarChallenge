@@ -1,119 +1,267 @@
 'use client';
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { usePitchDetector } from '@/hooks/usePitchDetector';
-import { freqToNote } from '@/lib/analysis/noteUtils';
 
-// Standard tuning: low E to high e
+// Standard tuning
 const STRINGS = [
-  { name: 'E2', label: '6 — Low E', freq: 82.41,  color: 'from-red-500 to-red-600' },
-  { name: 'A2', label: '5 — A',     freq: 110.00, color: 'from-orange-500 to-orange-600' },
-  { name: 'D3', label: '4 — D',     freq: 146.83, color: 'from-yellow-500 to-yellow-600' },
-  { name: 'G3', label: '3 — G',     freq: 196.00, color: 'from-green-500 to-green-600' },
-  { name: 'B3', label: '2 — B',     freq: 246.94, color: 'from-cyan-500 to-cyan-600' },
+  { name: 'E2', label: '6 — Low E',  freq: 82.41,  color: 'from-red-500 to-red-600' },
+  { name: 'A2', label: '5 — A',      freq: 110.00, color: 'from-orange-500 to-orange-600' },
+  { name: 'D3', label: '4 — D',      freq: 146.83, color: 'from-yellow-500 to-yellow-600' },
+  { name: 'G3', label: '3 — G',      freq: 196.00, color: 'from-green-500 to-green-600' },
+  { name: 'B3', label: '2 — B',      freq: 246.94, color: 'from-cyan-500 to-cyan-600' },
   { name: 'E4', label: '1 — High e', freq: 329.63, color: 'from-violet-500 to-violet-600' },
 ];
 
-// Detect which open string is closest to the detected frequency
-function closestString(freq: number) {
-  let best = STRINGS[0];
-  let bestDiff = Infinity;
-  for (const s of STRINGS) {
-    const cents = 1200 * Math.log2(freq / s.freq);
-    if (Math.abs(cents) < Math.abs(bestDiff)) {
-      bestDiff = cents;
-      best = s;
-    }
-  }
-  return { string: best, cents: Math.round(bestDiff) };
+// 8192 samples at 44100 Hz = ~186ms per analysis window (~15 cycles of low E at 82 Hz)
+const ANALYSIS_SIZE = 8192;
+// ScriptProcessor fires every 4096 samples; we accumulate two buffers before analysing
+const PROCESSOR_SIZE = 4096;
+// Median over the last N valid frequency readings to kill octave-flip noise
+const MEDIAN_WINDOW = 7;
+// Require RMS above this to ignore silent/decaying frames
+const MIN_RMS = 0.003;
+// Clarity threshold — relaxed slightly vs exercise detector because thick strings have
+// richer harmonics that can push pitchy's clarity score lower even when correct
+const MIN_CLARITY = 0.80;
+
+function rms(buf: Float32Array): number {
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+  return Math.sqrt(sum / buf.length);
 }
 
-interface StringState {
-  tuned: boolean;
-  lastCents: number | null;
+function median(arr: number[]): number {
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+// Find which open string is closest to freq (in cents)
+function closestString(freq: number) {
+  let best = STRINGS[0];
+  let bestCents = Infinity;
+  for (const s of STRINGS) {
+    const c = Math.abs(1200 * Math.log2(freq / s.freq));
+    if (c < bestCents) { bestCents = c; best = s; }
+  }
+  return { string: best, cents: Math.round(1200 * Math.log2(freq / best.freq)) };
+}
+
+interface StringState { tuned: boolean; lastCents: number | null; }
+
+interface TunerReading {
+  string: typeof STRINGS[0];
+  cents: number;         // smoothed
+  rawFreq: number;       // for display debugging
 }
 
 export default function GuitarTuner({ onAllTuned }: { onAllTuned: () => void }) {
-  const { isActive, isSupported, currentNote, clarity, error, start, stop } = usePitchDetector();
+  const [isActive, setIsActive] = useState(false);
+  const [isSupported] = useState(() =>
+    typeof window !== 'undefined' && 'AudioContext' in window && 'getUserMedia' in (navigator.mediaDevices ?? {})
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [reading, setReading] = useState<TunerReading | null>(null);
   const [stringStates, setStringStates] = useState<Record<string, StringState>>(
     Object.fromEntries(STRINGS.map(s => [s.name, { tuned: false, lastCents: null }]))
   );
-  const [activeString, setActiveString] = useState<typeof STRINGS[0] | null>(null);
-  const [detectedCents, setDetectedCents] = useState<number | null>(null);
-  // Track stable in-tune readings to debounce confirmation
-  const stableCountRef = useRef(0);
-  const lastCentsRef = useRef<number | null>(null);
+
+  // Audio refs
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  // Accumulation ring buffer — collects two PROCESSOR_SIZE chunks before analysing
+  const accumBufRef = useRef(new Float32Array(ANALYSIS_SIZE));
+  const halfFilled = useRef(false);
+  // Sliding median window — raw frequencies (not cents, to handle log-space correctly)
+  const freqHistoryRef = useRef<number[]>([]);
+  // Stable-count for per-string confirmation
+  const stableRef = useRef<{ string: string; count: number }>({ string: '', count: 0 });
+  // EMA state for smooth needle (display only)
+  const emaCentsRef = useRef<number | null>(null);
 
   const tunedCount = Object.values(stringStates).filter(s => s.tuned).length;
   const allTuned = tunedCount === STRINGS.length;
 
-  // Process pitch detections
-  useEffect(() => {
-    if (!currentNote || clarity < 0.88 || currentNote.frequency < 60) {
-      stableCountRef.current = 0;
-      return;
-    }
-    const { string, cents } = closestString(currentNote.frequency);
-    setActiveString(string);
-    setDetectedCents(cents);
+  const stop = useCallback(() => {
+    processorRef.current?.disconnect();
+    processorRef.current = null;
+    streamRef.current?.getTracks().forEach(t => t.stop());
+    streamRef.current = null;
+    audioCtxRef.current?.close().catch(() => {});
+    audioCtxRef.current = null;
+    setIsActive(false);
+    setReading(null);
+  }, []);
 
-    setStringStates(prev => ({
-      ...prev,
-      [string.name]: { ...prev[string.name], lastCents: cents },
-    }));
+  const start = useCallback(async () => {
+    if (isActive) return;
+    setError(null);
+    try {
+      const { PitchDetector } = await import('pitchy');
 
-    // Require 6 consecutive in-tune readings to confirm (debounce jitter)
-    if (Math.abs(cents) <= 8) {
-      if (Math.abs((lastCentsRef.current ?? 999) - cents) < 5) {
-        stableCountRef.current += 1;
-      } else {
-        stableCountRef.current = 1;
-      }
-      if (stableCountRef.current >= 6) {
+      // Request a fixed sample rate so our math is deterministic
+      const audioCtx = new AudioContext({ sampleRate: 44100 });
+      audioCtxRef.current = audioCtx;
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        video: false,
+      });
+      streamRef.current = stream;
+
+      const source = audioCtx.createMediaStreamSource(stream);
+
+      // Create detector for ANALYSIS_SIZE (8192) — not the processor size
+      const detector = PitchDetector.forFloat32Array(ANALYSIS_SIZE);
+
+      const processor = audioCtx.createScriptProcessor(PROCESSOR_SIZE, 1, 1);
+      processorRef.current = processor;
+
+      processor.onaudioprocess = (e) => {
+        const chunk = e.inputBuffer.getChannelData(0);
+
+        // Accumulate: first chunk fills the second half; second chunk shifts and fills again
+        if (!halfFilled.current) {
+          // First chunk: copy into second half of accumBuf
+          accumBufRef.current.set(chunk, PROCESSOR_SIZE);
+          halfFilled.current = true;
+          return; // wait for full window
+        }
+        // Second chunk: shift left by PROCESSOR_SIZE, append new chunk at end
+        accumBufRef.current.copyWithin(0, PROCESSOR_SIZE);
+        accumBufRef.current.set(chunk, PROCESSOR_SIZE);
+
+        const buf = accumBufRef.current;
+
+        // Gate on signal level — don't detect on silence or decay tail
+        if (rms(buf) < MIN_RMS) {
+          emaCentsRef.current = null;
+          setReading(null);
+          return;
+        }
+
+        const [rawFreq, clarity] = detector.findPitch(buf, audioCtx.sampleRate);
+
+        if (clarity < MIN_CLARITY || rawFreq < 70 || rawFreq > 400) return;
+
+        // ── Octave-error correction ──────────────────────────────────────────
+        // Pitchy sometimes returns 2× (or ½×) the true fundamental.
+        // Strategy: compare rawFreq against the history median. If it's ~1 octave
+        // away from the median, try the sub-octave (rawFreq/2) and see if that fits
+        // a string better.
+        let freq = rawFreq;
+        const history = freqHistoryRef.current;
+        if (history.length >= 3) {
+          const med = median(history);
+          const octaveRatio = freq / med;
+          // If the new reading is ~2× the history median → likely octave error
+          if (octaveRatio > 1.7 && octaveRatio < 2.3) {
+            const subOctave = freq / 2;
+            const { cents: cSub } = closestString(subOctave);
+            const { cents: cRaw } = closestString(freq);
+            if (Math.abs(cSub) < Math.abs(cRaw)) freq = subOctave;
+          }
+        }
+
+        // ── Median smoothing ─────────────────────────────────────────────────
+        // Keep a fixed-length window of raw frequencies (in Hz, not cents — median
+        // in Hz is more natural than in log-space for this purpose)
+        freqHistoryRef.current = [...history.slice(-(MEDIAN_WINDOW - 1)), freq];
+        if (freqHistoryRef.current.length < 3) return; // wait for enough history
+
+        const smoothFreq = median(freqHistoryRef.current);
+        const { string, cents } = closestString(smoothFreq);
+
+        // ── EMA for the needle display (purely cosmetic) ──────────────────────
+        const EMA_ALPHA = 0.35; // lower = smoother but more lag
+        if (emaCentsRef.current === null) {
+          emaCentsRef.current = cents;
+        } else {
+          emaCentsRef.current = EMA_ALPHA * cents + (1 - EMA_ALPHA) * emaCentsRef.current;
+        }
+        const displayCents = Math.round(emaCentsRef.current);
+
+        setReading({ string, cents: displayCents, rawFreq: smoothFreq });
+
+        // Update per-string lastCents immediately (before stable check)
         setStringStates(prev => ({
           ...prev,
-          [string.name]: { tuned: true, lastCents: cents },
+          [string.name]: prev[string.name].tuned
+            ? prev[string.name]
+            : { ...prev[string.name], lastCents: displayCents },
         }));
-        stableCountRef.current = 0;
-      }
-    } else {
-      stableCountRef.current = 0;
+
+        // ── Stable-count confirmation ─────────────────────────────────────────
+        // Require IN_TUNE_COUNT consecutive in-tune readings on the SAME string
+        const IN_TUNE_THRESHOLD = 8;  // ¢
+        const CONFIRM_FRAMES = 8;     // ~8 × 93ms ≈ 0.75 s of steady in-tune signal
+
+        if (Math.abs(cents) <= IN_TUNE_THRESHOLD) {
+          if (stableRef.current.string === string.name) {
+            stableRef.current.count += 1;
+          } else {
+            stableRef.current = { string: string.name, count: 1 };
+          }
+          if (stableRef.current.count >= CONFIRM_FRAMES) {
+            setStringStates(prev => {
+              if (prev[string.name].tuned) return prev;
+              return { ...prev, [string.name]: { tuned: true, lastCents: displayCents } };
+            });
+            stableRef.current = { string: '', count: 0 };
+          }
+        } else {
+          if (stableRef.current.string === string.name) {
+            stableRef.current.count = 0;
+          }
+        }
+      };
+
+      source.connect(processor);
+      // Don't connect to destination — we don't want to hear ourselves
+      processor.connect(audioCtx.createGain()); // sink (no output)
+
+      setIsActive(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Microphone access denied');
+      stop();
     }
-    lastCentsRef.current = cents;
-  }, [currentNote, clarity]);
+  }, [isActive, stop]);
 
-  // Needle angle: ±50 cents maps to ±70deg
-  const needleAngle = detectedCents !== null ? Math.max(-70, Math.min(70, detectedCents * 1.4)) : 0;
+  useEffect(() => () => { stop(); }, [stop]);
 
-  const inTune = detectedCents !== null && Math.abs(detectedCents) <= 8;
-  const slightlyOff = detectedCents !== null && Math.abs(detectedCents) > 8 && Math.abs(detectedCents) <= 25;
-
-  const needleColor = !activeString ? '#52525b' :
-    inTune ? '#22c55e' :
-    slightlyOff ? '#eab308' : '#ef4444';
+  // ── Derived display values ────────────────────────────────────────────────
+  const cents = reading?.cents ?? null;
+  const activeString = reading?.string ?? null;
+  const inTune     = cents !== null && Math.abs(cents) <= 8;
+  const slightlyOff = cents !== null && Math.abs(cents) > 8 && Math.abs(cents) <= 25;
+  const needleAngle = cents !== null ? Math.max(-70, Math.min(70, cents * 1.4)) : 0;
+  const needleColor = !activeString ? '#52525b'
+    : inTune ? '#22c55e' : slightlyOff ? '#eab308' : '#ef4444';
 
   return (
     <div className="flex flex-col items-center gap-6 w-full max-w-md mx-auto">
-      {/* Tuner dial */}
-      <div className="relative w-72 h-40 select-none">
-        {/* Arc background */}
+
+      {/* ── Needle dial ─────────────────────────────────────────────────── */}
+      <div className="relative w-72 h-44 select-none">
         <svg viewBox="0 0 288 160" className="w-full h-full" style={{ overflow: 'visible' }}>
-          {/* Scale arc */}
-          <path d="M 24 140 A 120 120 0 0 1 264 140" fill="none" stroke="#27272a" strokeWidth="8" strokeLinecap="round" />
-          {/* Green in-tune zone */}
-          <path d="M 132 24 A 120 120 0 0 1 156 24" fill="none" stroke="#166534" strokeWidth="8" strokeLinecap="round" />
+          {/* Background arc */}
+          <path d="M 24 140 A 120 120 0 0 1 264 140"
+            fill="none" stroke="#27272a" strokeWidth="8" strokeLinecap="round" />
+          {/* Green zone (±8¢) */}
+          <path d="M 137 21 A 120 120 0 0 1 151 21"
+            fill="none" stroke="#166534" strokeWidth="10" strokeLinecap="round" />
 
           {/* Tick marks */}
           {[-50, -25, 0, 25, 50].map(c => {
-            const angle = (c / 50) * 70 * (Math.PI / 180);
-            const cx = 144 + 120 * Math.sin(angle);
-            const cy = 140 - 120 * Math.cos(angle);
-            const ix = 144 + 108 * Math.sin(angle);
-            const iy = 140 - 108 * Math.cos(angle);
+            const a = (c / 50) * 70 * (Math.PI / 180);
+            const cx = 144 + 120 * Math.sin(a), cy = 140 - 120 * Math.cos(a);
+            const ix = 144 + 106 * Math.sin(a), iy = 140 - 106 * Math.cos(a);
             return (
               <g key={c}>
                 <line x1={ix} y1={iy} x2={cx} y2={cy}
-                  stroke={c === 0 ? '#22c55e' : '#3f3f46'} strokeWidth={c === 0 ? 2 : 1} />
-                <text x={cx + Math.sin(angle) * 14} y={cy - Math.cos(angle) * 14}
+                  stroke={c === 0 ? '#22c55e' : '#3f3f46'}
+                  strokeWidth={c === 0 ? 2.5 : 1} />
+                <text x={cx + Math.sin(a) * 15} y={cy - Math.cos(a) * 15}
                   textAnchor="middle" dominantBaseline="middle"
                   fontSize="9" fill={c === 0 ? '#4ade80' : '#52525b'}>
                   {c === 0 ? '0' : `${c > 0 ? '+' : ''}${c}`}
@@ -122,72 +270,82 @@ export default function GuitarTuner({ onAllTuned }: { onAllTuned: () => void }) 
             );
           })}
 
-          {/* Needle */}
-          <g style={{ transform: `rotate(${needleAngle}deg)`, transformOrigin: '144px 140px', transition: 'transform 80ms ease-out' }}>
-            <line x1="144" y1="140" x2="144" y2="30"
+          {/* Needle — CSS transition gives smooth EMA motion */}
+          <g style={{
+            transform: `rotate(${needleAngle}deg)`,
+            transformOrigin: '144px 140px',
+            transition: 'transform 120ms ease-out',
+          }}>
+            <line x1="144" y1="140" x2="144" y2="28"
               stroke={needleColor} strokeWidth="2.5" strokeLinecap="round" />
-            <circle cx="144" cy="30" r="4" fill={needleColor} />
+            <circle cx="144" cy="28" r="4.5" fill={needleColor} />
           </g>
 
-          {/* Pivot dot */}
           <circle cx="144" cy="140" r="6" fill="#3f3f46" />
           <circle cx="144" cy="140" r="3" fill="#71717a" />
         </svg>
 
-        {/* Cents readout */}
+        {/* Cents + direction */}
         <div className="absolute bottom-0 left-0 right-0 flex flex-col items-center gap-0.5">
-          {activeString ? (
+          {isActive && activeString ? (
             <>
               <span className={`text-3xl font-black font-mono tabular-nums ${
                 inTune ? 'text-green-400' : slightlyOff ? 'text-yellow-400' : 'text-red-400'
               }`}>
-                {detectedCents !== null ? (detectedCents > 0 ? `+${detectedCents}` : `${detectedCents}`) : '—'}¢
+                {cents !== null ? (cents > 0 ? `+${cents}` : `${cents}`) : '—'}¢
               </span>
               <span className="text-xs text-zinc-500">
-                {inTune ? '✓ In tune' : detectedCents! > 0 ? '▼ Tune down' : '▲ Tune up'}
+                {inTune ? '✓ In tune' : cents! > 0 ? '▼ Tune down (loosen peg)' : '▲ Tune up (tighten peg)'}
               </span>
             </>
           ) : (
-            <span className="text-sm text-zinc-600">Pluck a string…</span>
+            <span className="text-sm text-zinc-600">
+              {isActive ? 'Pluck a string…' : 'Enable mic to start'}
+            </span>
           )}
         </div>
       </div>
 
-      {/* Detected string label */}
-      {activeString && (
-        <div className={`px-5 py-2 rounded-full text-sm font-bold bg-gradient-to-r ${activeString.color} text-white shadow-lg`}>
-          Detected: String {activeString.label}
-        </div>
-      )}
+      {/* ── Detected string badge ─────────────────────────────────────────── */}
+      <div className="h-9 flex items-center justify-center">
+        {isActive && activeString ? (
+          <div className={`px-5 py-1.5 rounded-full text-sm font-bold bg-gradient-to-r ${activeString.color} text-white shadow-lg transition-all`}>
+            Detecting: String {activeString.label}
+          </div>
+        ) : (
+          <div className="px-5 py-1.5 rounded-full text-sm text-zinc-600 border border-zinc-800">
+            No signal
+          </div>
+        )}
+      </div>
 
-      {/* Per-string status grid */}
+      {/* ── Per-string grid ──────────────────────────────────────────────── */}
       <div className="grid grid-cols-6 gap-2 w-full">
         {STRINGS.map(s => {
           const state = stringStates[s.name];
-          const isActive = activeString?.name === s.name;
-          const cents = state.lastCents;
+          const isCurrent = isActive && activeString?.name === s.name;
+          const c = state.lastCents;
+          const cellInTune = c !== null && Math.abs(c) <= 8;
+          const cellOff    = c !== null && Math.abs(c) > 8 && Math.abs(c) <= 25;
           return (
-            <div
-              key={s.name}
-              className={`flex flex-col items-center gap-1 p-2 rounded-xl border transition-all ${
-                state.tuned
-                  ? 'border-green-500/60 bg-green-500/10'
-                  : isActive
-                  ? 'border-amber-400/60 bg-amber-500/10 scale-105'
-                  : 'border-zinc-700/60 bg-zinc-900/40'
-              }`}
-            >
+            <div key={s.name} className={`flex flex-col items-center gap-1 p-2 rounded-xl border transition-all duration-150 ${
+              state.tuned
+                ? 'border-green-500/60 bg-green-500/10'
+                : isCurrent
+                ? 'border-amber-400/60 bg-amber-500/10 scale-105'
+                : 'border-zinc-700/60 bg-zinc-900/40'
+            }`}>
               <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold bg-gradient-to-br ${s.color} ${
-                state.tuned ? 'opacity-100' : 'opacity-40'
+                state.tuned ? 'opacity-100' : isCurrent ? 'opacity-80' : 'opacity-30'
               }`}>
                 {state.tuned ? '✓' : s.name.replace(/\d/, '')}
               </div>
-              <span className={`text-xs font-mono ${
-                state.tuned ? 'text-green-400' :
-                isActive ? (inTune ? 'text-green-400' : slightlyOff ? 'text-yellow-400' : 'text-red-400') :
+              <span className={`text-xs font-mono transition-colors ${
+                state.tuned   ? 'text-green-400' :
+                isCurrent     ? (cellInTune ? 'text-green-400' : cellOff ? 'text-yellow-400' : 'text-red-400') :
                 'text-zinc-600'
               }`}>
-                {state.tuned ? '+0¢' : cents !== null ? `${cents > 0 ? '+' : ''}${cents}¢` : '—'}
+                {state.tuned ? '+0¢' : c !== null ? `${c > 0 ? '+' : ''}${c}¢` : '—'}
               </span>
               <span className="text-xs text-zinc-600 leading-none">{s.name}</span>
             </div>
@@ -195,7 +353,7 @@ export default function GuitarTuner({ onAllTuned }: { onAllTuned: () => void }) 
         })}
       </div>
 
-      {/* Progress */}
+      {/* ── Progress bar ─────────────────────────────────────────────────── */}
       <div className="w-full flex flex-col gap-1.5">
         <div className="flex justify-between text-xs text-zinc-500">
           <span>{tunedCount}/6 strings tuned</span>
@@ -209,41 +367,31 @@ export default function GuitarTuner({ onAllTuned }: { onAllTuned: () => void }) 
         </div>
       </div>
 
-      {/* Mic button / error */}
+      {/* ── Mic button / status ──────────────────────────────────────────── */}
       {!isActive ? (
-        <button
-          onClick={start}
-          disabled={!isSupported}
-          className="px-8 py-3 rounded-xl bg-amber-500 text-black font-bold hover:bg-amber-400 transition-all disabled:opacity-40"
-        >
+        <button onClick={start} disabled={!isSupported}
+          className="px-8 py-3 rounded-xl bg-amber-500 text-black font-bold hover:bg-amber-400 transition-all disabled:opacity-40">
           🎤 Enable Microphone
         </button>
       ) : (
         <div className="flex items-center gap-2 text-xs text-zinc-500">
           <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-          Mic active — pluck each string and hold until confirmed
+          Listening — pluck a string and hold it steady until it turns green
         </div>
       )}
 
-      {error && (
-        <p className="text-xs text-red-400 text-center max-w-xs">{error}</p>
-      )}
+      {error && <p className="text-xs text-red-400 text-center max-w-xs">{error}</p>}
 
-      {/* CTA */}
+      {/* ── CTA once all tuned ───────────────────────────────────────────── */}
       {allTuned && (
-        <button
-          onClick={() => { stop(); onAllTuned(); }}
-          className="w-full py-4 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 text-black font-black text-lg hover:from-amber-400 hover:to-orange-400 transition-all shadow-xl animate-pulse"
-        >
+        <button onClick={() => { stop(); onAllTuned(); }}
+          className="w-full py-4 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 text-black font-black text-lg hover:from-amber-400 hover:to-orange-400 transition-all shadow-xl animate-pulse">
           🎸 Guitar Tuned — Start the Challenge!
         </button>
       )}
 
-      {/* Skip */}
-      <button
-        onClick={() => { stop(); onAllTuned(); }}
-        className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors underline underline-offset-2"
-      >
+      <button onClick={() => { stop(); onAllTuned(); }}
+        className="text-xs text-zinc-600 hover:text-zinc-400 transition-colors underline underline-offset-2">
         Skip tuning (already in tune)
       </button>
     </div>
