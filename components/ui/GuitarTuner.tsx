@@ -61,6 +61,7 @@ export default function GuitarTuner({ onAllTuned }: { onAllTuned: () => void }) 
   );
   const [error, setError] = useState<string | null>(null);
   const [reading, setReading] = useState<TunerReading | null>(null);
+  const [signalLevel, setSignalLevel] = useState(0); // 0-1 RMS for debug bar
   const [stringStates, setStringStates] = useState<Record<string, StringState>>(
     Object.fromEntries(STRINGS.map(s => [s.name, { tuned: false, lastCents: null }]))
   );
@@ -69,9 +70,8 @@ export default function GuitarTuner({ onAllTuned }: { onAllTuned: () => void }) 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
-  // Accumulation ring buffer — collects two PROCESSOR_SIZE chunks before analysing
+  // Accumulation ring buffer — slides a 8192-sample window from two 4096-sample chunks
   const accumBufRef = useRef(new Float32Array(ANALYSIS_SIZE));
-  const halfFilled = useRef(false);
   // Sliding median window — raw frequencies (not cents, to handle log-space correctly)
   const freqHistoryRef = useRef<number[]>([]);
   // Stable-count for per-string confirmation
@@ -99,42 +99,46 @@ export default function GuitarTuner({ onAllTuned }: { onAllTuned: () => void }) 
     try {
       const { PitchDetector } = await import('pitchy');
 
-      // Request a fixed sample rate so our math is deterministic
-      const audioCtx = new AudioContext({ sampleRate: 44100 });
-      audioCtxRef.current = audioCtx;
-
+      // getUserMedia first — keeps us inside the user-gesture activation window
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
         video: false,
       });
       streamRef.current = stream;
 
+      const audioCtx = new AudioContext();
+      audioCtxRef.current = audioCtx;
+      // AudioContext starts suspended on many browsers — must resume explicitly
+      await audioCtx.resume();
+
       const source = audioCtx.createMediaStreamSource(stream);
 
-      // Create detector for ANALYSIS_SIZE (8192) — not the processor size
+      // Detector sized to ANALYSIS_SIZE so pitchy sees a full 8192-sample window
       const detector = PitchDetector.forFloat32Array(ANALYSIS_SIZE);
 
       const processor = audioCtx.createScriptProcessor(PROCESSOR_SIZE, 1, 1);
       processorRef.current = processor;
 
+      // Track how many chunks we've received so we fill the ring buffer before analysing
+      let chunksReceived = 0;
+
       processor.onaudioprocess = (e) => {
         const chunk = e.inputBuffer.getChannelData(0);
+        chunksReceived++;
 
-        // Accumulate: first chunk fills the second half; second chunk shifts and fills again
-        if (!halfFilled.current) {
-          // First chunk: copy into second half of accumBuf
-          accumBufRef.current.set(chunk, PROCESSOR_SIZE);
-          halfFilled.current = true;
-          return; // wait for full window
-        }
-        // Second chunk: shift left by PROCESSOR_SIZE, append new chunk at end
+        // Slide the ring buffer left by one chunk and append the new chunk at the end
         accumBufRef.current.copyWithin(0, PROCESSOR_SIZE);
         accumBufRef.current.set(chunk, PROCESSOR_SIZE);
 
+        // Don't analyse until the buffer has been fully populated (2 chunks)
+        if (chunksReceived < 2) return;
+
         const buf = accumBufRef.current;
+        const currentRms = rms(buf);
+        setSignalLevel(Math.min(1, currentRms / 0.05)); // scale for display
 
         // Gate on signal level — don't detect on silence or decay tail
-        if (rms(buf) < MIN_RMS) {
+        if (currentRms < MIN_RMS) {
           emaCentsRef.current = null;
           setReading(null);
           return;
@@ -217,8 +221,12 @@ export default function GuitarTuner({ onAllTuned }: { onAllTuned: () => void }) 
       };
 
       source.connect(processor);
-      // Don't connect to destination — we don't want to hear ourselves
-      processor.connect(audioCtx.createGain()); // sink (no output)
+      // ScriptProcessorNode only fires onaudioprocess when the graph reaches destination.
+      // Use a silent gain node (volume 0) so nothing is audible but the callback fires.
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
+      processor.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
 
       setIsActive(true);
     } catch (err) {
@@ -374,9 +382,32 @@ export default function GuitarTuner({ onAllTuned }: { onAllTuned: () => void }) 
           🎤 Enable Microphone
         </button>
       ) : (
-        <div className="flex items-center gap-2 text-xs text-zinc-500">
-          <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-          Listening — pluck a string and hold it steady until it turns green
+        <div className="flex flex-col items-center gap-2 w-full">
+          <div className="flex items-center gap-2 text-xs text-zinc-500">
+            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+            Listening — pluck a string and hold it steady until it turns green
+          </div>
+          {/* Signal level bar — shows mic is working even before a note is detected */}
+          <div className="w-full flex items-center gap-2">
+            <span className="text-xs text-zinc-600 w-10 flex-shrink-0">Signal</span>
+            <div className="flex-1 h-2 bg-zinc-800 rounded-full overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all duration-75"
+                style={{
+                  width: `${signalLevel * 100}%`,
+                  background: signalLevel > 0.15 ? '#22c55e' : signalLevel > 0.02 ? '#eab308' : '#52525b',
+                }}
+              />
+            </div>
+            <span className="text-xs text-zinc-600 w-8 text-right flex-shrink-0">
+              {signalLevel > 0.02 ? '🎵' : '—'}
+            </span>
+          </div>
+          {signalLevel < 0.02 && (
+            <p className="text-xs text-zinc-600 text-center">
+              No signal detected — pluck a string loudly, or check mic permissions in browser settings
+            </p>
+          )}
         </div>
       )}
 
