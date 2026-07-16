@@ -1,8 +1,10 @@
 'use client';
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import type { HourLesson } from '@/data/curriculum';
 import { CURRICULUM } from '@/data/curriculum';
 import ExercisePlayer from '@/components/ui/ExercisePlayer';
+import FretboardGame from '@/components/ui/FretboardGame';
 import MetronomePanel from '@/components/ui/MetronomePanel';
 import SideQuestPanel from '@/components/ui/SideQuestPanel';
 import BackingTrackPanel from '@/components/ui/BackingTrackPanel';
@@ -13,13 +15,18 @@ import { SONGS } from '@/data/songs';
 
 interface Props {
   lesson: HourLesson;
+  lessonIndex: number;
 }
 
-export default function LessonPage({ lesson }: Props) {
+export default function LessonPage({ lesson, lessonIndex }: Props) {
+  const router = useRouter();
   const [exerciseIdx, setExerciseIdx] = useState(0);
   const [completedExs, setCompletedExs] = useState<Set<string>>(new Set());
   const [showTheory, setShowTheory] = useState(true);
   const { completedExercises, selectedSongId } = useSessionStore();
+
+  const nextLesson = lessonIndex < CURRICULUM.length - 1 ? CURRICULUM[lessonIndex + 1] : null;
+  const nextLessonIdx = lessonIndex + 1;
 
   const currentExercise = lesson.exercises[exerciseIdx];
   const allDone = lesson.exercises.every(e => completedExs.has(e.id) || completedExercises.includes(e.id));
@@ -44,7 +51,7 @@ export default function LessonPage({ lesson }: Props) {
             <div className="flex items-center gap-3 mb-2">
               <span className="text-4xl">{lesson.icon}</span>
               <div>
-                <p className="text-xs text-white/60 font-medium uppercase tracking-wider">Hour {lesson.hour + 1}</p>
+                <p className="text-xs text-white/60 font-medium uppercase tracking-wider">Lesson {lessonIndex + 1} of {CURRICULUM.length}</p>
                 <h1 className="text-2xl font-black text-white">{lesson.title}</h1>
               </div>
             </div>
@@ -129,20 +136,50 @@ export default function LessonPage({ lesson }: Props) {
         </div>
 
         {/* Active exercise */}
-        {currentExercise && (
+        {currentExercise && currentExercise.type === 'fretboard-game' && currentExercise.fretTargets ? (
+          <FretboardGame
+            key={currentExercise.id}
+            targets={currentExercise.fretTargets}
+            timeLimit={currentExercise.durationSeconds}
+            title={currentExercise.title}
+            instruction={currentExercise.instruction}
+            successThreshold={currentExercise.successThreshold}
+            onComplete={(accuracy) => {
+              handleExerciseComplete(accuracy);
+            }}
+          />
+        ) : currentExercise ? (
           <ExercisePlayer
             key={currentExercise.id}
             exercise={currentExercise}
             onComplete={handleExerciseComplete}
           />
-        )}
+        ) : null}
 
-        {/* Completion message */}
+        {/* Completion message + Next Hour button */}
         {allDone && (
           <div className="p-5 rounded-xl bg-green-500/10 border border-green-500/30">
             <p className="text-green-300 font-semibold text-base mb-2">🎉 Hour {lesson.hour + 1} Complete!</p>
             <p className="text-green-200/80 text-sm leading-relaxed">{lesson.completionMessage}</p>
+            {nextLesson && (
+              <button
+                onClick={() => router.push(`/session/${nextLessonIdx}`)}
+                className="mt-4 w-full py-3 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 text-black font-bold hover:from-amber-400 hover:to-orange-400 transition-all"
+              >
+                Next: {nextLesson.title} →
+              </button>
+            )}
           </div>
+        )}
+
+        {/* Skip to next hour button (always available) */}
+        {nextLesson && !allDone && (
+          <button
+            onClick={() => router.push(`/session/${nextLessonIdx}`)}
+            className="w-full py-2.5 rounded-xl border border-zinc-700 text-zinc-400 text-sm font-medium hover:border-amber-500/40 hover:text-amber-400 transition-all"
+          >
+            Skip to next hour: {nextLesson.title} →
+          </button>
         )}
 
         {/* Song backing track */}
@@ -167,7 +204,7 @@ export default function LessonPage({ lesson }: Props) {
               const lDone = l.exercises.every(e => completedExercises.includes(e.id));
               return (
                 <div key={i} className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${
-                  l.hour === lesson.hour
+                  i === lessonIndex
                     ? 'bg-amber-500/10 border border-amber-500/30 text-amber-400'
                     : lDone
                     ? 'bg-zinc-800/60 text-green-400'
@@ -176,7 +213,7 @@ export default function LessonPage({ lesson }: Props) {
                   <span>{l.icon}</span>
                   <span className="flex-1">{l.title}</span>
                   {lDone && <span>✓</span>}
-                  {l.hour === lesson.hour && <span>●</span>}
+                  {i === lessonIndex && <span>●</span>}
                 </div>
               );
             })}

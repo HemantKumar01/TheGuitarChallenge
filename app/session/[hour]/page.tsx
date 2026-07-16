@@ -7,13 +7,13 @@ interface Props {
 }
 
 export function generateStaticParams() {
-  return CURRICULUM.map(l => ({ hour: String(l.hour) }));
+  return CURRICULUM.map((_, i) => ({ hour: String(i) }));
 }
 
 export default async function HourPage({ params }: Props) {
   const { hour } = await params;
-  const hourNum = parseInt(hour);
-  const lesson = CURRICULUM.find(l => l.hour === hourNum);
+  const idx = parseInt(hour);
+  const lesson = CURRICULUM[idx];
   if (!lesson) notFound();
-  return <LessonPage lesson={lesson} />;
+  return <LessonPage lesson={lesson} lessonIndex={idx} />;
 }

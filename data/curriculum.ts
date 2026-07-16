@@ -1,14 +1,20 @@
 import type { ChordName } from './chords';
 
+export interface FretTarget {
+  string: number; // 1-6 (1=high e, 6=low E)
+  fret: number;   // 0-12
+}
+
 export interface Exercise {
   id: string;
-  type: 'open-string' | 'single-note' | 'chord-hold' | 'chord-transition' | 'song-playalong' | 'chromatic';
+  type: 'open-string' | 'single-note' | 'chord-hold' | 'chord-transition' | 'song-playalong' | 'chromatic' | 'fretboard-game';
   title: string;
   instruction: string;
   targetNotes?: string[]; // note names e.g. ['E2', 'A2', 'D3']
   targetChord?: ChordName;
   fromChord?: ChordName;
   toChord?: ChordName;
+  fretTargets?: FretTarget[]; // for fretboard-game type
   durationSeconds: number;
   bpm?: number;
   reps?: number;
@@ -164,6 +170,83 @@ export const CURRICULUM: HourLesson[] = [
   },
   {
     hour: 2,
+    title: 'Fretboard Navigation',
+    subtitle: 'Game: play the note shown on screen',
+    icon: '🎯',
+    color: 'from-pink-500 to-rose-600',
+    chordsIntroduced: [],
+    theory: [
+      'This is a GAME — a fret number and string are shown on screen. Play it as fast as you can!',
+      'Each string has a color. The fret number tells you where to press.',
+      'Fret 0 = open string (don\'t press anything, just pluck).',
+      'Start with single-string exercises, then progress to jumping between strings.',
+      'Your goal: build muscle memory so your fingers go to the right fret WITHOUT thinking.',
+      'Speed will come naturally — focus on accuracy first, then try to beat your streak.',
+    ],
+    exercises: [
+      {
+        id: 'fret-game-single-e',
+        type: 'fretboard-game' as const,
+        title: 'Single String — Low E (Frets 0-4)',
+        instruction: 'Play the shown fret on the low E string. Simple movement along one string.',
+        fretTargets: [
+          { string: 6, fret: 0 }, { string: 6, fret: 1 }, { string: 6, fret: 2 },
+          { string: 6, fret: 3 }, { string: 6, fret: 4 }, { string: 6, fret: 2 },
+          { string: 6, fret: 0 }, { string: 6, fret: 3 }, { string: 6, fret: 1 },
+          { string: 6, fret: 4 }, { string: 6, fret: 0 }, { string: 6, fret: 2 },
+        ],
+        durationSeconds: 60,
+        successThreshold: 0.6,
+      },
+      {
+        id: 'fret-game-single-a',
+        type: 'fretboard-game' as const,
+        title: 'Single String — A (Frets 0-5)',
+        instruction: 'Same game on the A string. A bit higher pitch — listen for the difference.',
+        fretTargets: [
+          { string: 5, fret: 0 }, { string: 5, fret: 2 }, { string: 5, fret: 3 },
+          { string: 5, fret: 5 }, { string: 5, fret: 3 }, { string: 5, fret: 2 },
+          { string: 5, fret: 0 }, { string: 5, fret: 4 }, { string: 5, fret: 1 },
+          { string: 5, fret: 5 }, { string: 5, fret: 2 }, { string: 5, fret: 0 },
+        ],
+        durationSeconds: 60,
+        successThreshold: 0.6,
+      },
+      {
+        id: 'fret-game-two-strings',
+        type: 'fretboard-game' as const,
+        title: 'Two Strings — E & A (Frets 0-4)',
+        instruction: 'Now jumping between E and A strings! Watch which string is highlighted.',
+        fretTargets: [
+          { string: 6, fret: 0 }, { string: 5, fret: 0 }, { string: 6, fret: 2 },
+          { string: 5, fret: 2 }, { string: 6, fret: 3 }, { string: 5, fret: 3 },
+          { string: 5, fret: 0 }, { string: 6, fret: 4 }, { string: 5, fret: 2 },
+          { string: 6, fret: 1 }, { string: 5, fret: 4 }, { string: 6, fret: 0 },
+          { string: 5, fret: 3 }, { string: 6, fret: 2 }, { string: 5, fret: 1 },
+        ],
+        durationSeconds: 75,
+        successThreshold: 0.55,
+      },
+      {
+        id: 'fret-game-three-strings',
+        type: 'fretboard-game' as const,
+        title: 'Three Strings — E, A, D (Frets 0-5)',
+        instruction: 'Adding the D string! Three bass strings, random positions. Get that muscle memory firing.',
+        fretTargets: [
+          { string: 6, fret: 0 }, { string: 4, fret: 2 }, { string: 5, fret: 3 },
+          { string: 6, fret: 3 }, { string: 4, fret: 0 }, { string: 5, fret: 2 },
+          { string: 4, fret: 4 }, { string: 6, fret: 2 }, { string: 5, fret: 0 },
+          { string: 4, fret: 3 }, { string: 6, fret: 5 }, { string: 5, fret: 4 },
+          { string: 4, fret: 2 }, { string: 6, fret: 1 }, { string: 5, fret: 5 },
+        ],
+        durationSeconds: 90,
+        successThreshold: 0.5,
+      },
+    ],
+    completionMessage: 'Your fingers are starting to find positions without looking. That\'s the beginning of real muscle memory!',
+  },
+  {
+    hour: 2,
     title: 'First Chords',
     subtitle: 'Em and Am — your first two chords',
     icon: '🤘',
@@ -285,6 +368,94 @@ export const CURRICULUM: HourLesson[] = [
       },
     ],
     completionMessage: 'Three power chords mastered! G, C, D alone unlock over 100 songs. Your fingers are starting to remember these shapes.',
+  },
+  {
+    hour: 4,
+    title: 'Fretboard Mastery',
+    subtitle: 'Advanced multi-string navigation game',
+    icon: '🏹',
+    color: 'from-fuchsia-500 to-purple-600',
+    chordsIntroduced: [],
+    theory: [
+      'Time to go FAST. All 6 strings, frets 0-7. Random positions — pure reflex training.',
+      'Treble strings (1-3) are thinner and higher-pitched. Bass strings (4-6) are thicker.',
+      'Position shifts: move your whole hand when jumping more than 4 frets apart.',
+      'The "spider walk" technique: index on fret 1, middle on 2, ring on 3, pinky on 4. Shift up by moving index to fret 2.',
+      'Look at the target, find it on your guitar, THEN play. Don\'t rush the initial placement.',
+      'Your streak counter is your enemy. Beat your previous best. Make it a competition against yourself.',
+    ],
+    exercises: [
+      {
+        id: 'fret-game-all-strings-easy',
+        type: 'fretboard-game' as const,
+        title: 'All 6 Strings — Frets 0-3 (Easy)',
+        instruction: 'Random positions on all 6 strings. Only frets 0-3. Focus on finding the right string first.',
+        fretTargets: [
+          { string: 1, fret: 0 }, { string: 6, fret: 2 }, { string: 3, fret: 1 },
+          { string: 5, fret: 3 }, { string: 2, fret: 0 }, { string: 4, fret: 2 },
+          { string: 6, fret: 0 }, { string: 1, fret: 3 }, { string: 3, fret: 2 },
+          { string: 5, fret: 1 }, { string: 2, fret: 3 }, { string: 4, fret: 0 },
+          { string: 1, fret: 2 }, { string: 6, fret: 3 }, { string: 3, fret: 0 },
+          { string: 4, fret: 3 }, { string: 2, fret: 1 }, { string: 5, fret: 0 },
+        ],
+        durationSeconds: 90,
+        successThreshold: 0.5,
+      },
+      {
+        id: 'fret-game-all-strings-medium',
+        type: 'fretboard-game' as const,
+        title: 'All 6 Strings — Frets 0-5 (Medium)',
+        instruction: 'Wider fret range now. Your hand needs to shift positions. Think before you move!',
+        fretTargets: [
+          { string: 6, fret: 5 }, { string: 1, fret: 0 }, { string: 4, fret: 3 },
+          { string: 2, fret: 4 }, { string: 5, fret: 2 }, { string: 3, fret: 5 },
+          { string: 1, fret: 3 }, { string: 6, fret: 0 }, { string: 4, fret: 5 },
+          { string: 2, fret: 1 }, { string: 5, fret: 4 }, { string: 3, fret: 2 },
+          { string: 6, fret: 3 }, { string: 1, fret: 5 }, { string: 4, fret: 0 },
+          { string: 3, fret: 4 }, { string: 5, fret: 5 }, { string: 2, fret: 2 },
+          { string: 6, fret: 4 }, { string: 1, fret: 1 },
+        ],
+        durationSeconds: 100,
+        successThreshold: 0.45,
+      },
+      {
+        id: 'fret-game-all-strings-hard',
+        type: 'fretboard-game' as const,
+        title: 'All 6 Strings — Frets 0-7 (Hard)',
+        instruction: 'Full range! Big jumps between strings AND frets. This is the real deal.',
+        fretTargets: [
+          { string: 6, fret: 7 }, { string: 1, fret: 0 }, { string: 3, fret: 5 },
+          { string: 5, fret: 2 }, { string: 2, fret: 7 }, { string: 4, fret: 4 },
+          { string: 6, fret: 0 }, { string: 1, fret: 5 }, { string: 3, fret: 7 },
+          { string: 5, fret: 3 }, { string: 2, fret: 0 }, { string: 4, fret: 6 },
+          { string: 6, fret: 5 }, { string: 1, fret: 7 }, { string: 3, fret: 2 },
+          { string: 5, fret: 7 }, { string: 2, fret: 3 }, { string: 4, fret: 0 },
+          { string: 6, fret: 3 }, { string: 1, fret: 4 }, { string: 3, fret: 6 },
+          { string: 5, fret: 5 }, { string: 2, fret: 5 }, { string: 4, fret: 7 },
+        ],
+        durationSeconds: 120,
+        successThreshold: 0.4,
+      },
+      {
+        id: 'fret-game-speed-run',
+        type: 'fretboard-game' as const,
+        title: 'Speed Run — Adjacent Frets Challenge',
+        instruction: 'Quick adjacent movements. Small shifts that should be FAST. Beat your streak!',
+        fretTargets: [
+          { string: 6, fret: 1 }, { string: 6, fret: 2 }, { string: 6, fret: 3 },
+          { string: 5, fret: 3 }, { string: 5, fret: 2 }, { string: 5, fret: 1 },
+          { string: 4, fret: 1 }, { string: 4, fret: 2 }, { string: 4, fret: 3 },
+          { string: 3, fret: 3 }, { string: 3, fret: 2 }, { string: 3, fret: 1 },
+          { string: 2, fret: 1 }, { string: 2, fret: 2 }, { string: 2, fret: 3 },
+          { string: 1, fret: 3 }, { string: 1, fret: 2 }, { string: 1, fret: 1 },
+          { string: 1, fret: 0 }, { string: 2, fret: 0 }, { string: 3, fret: 0 },
+          { string: 4, fret: 0 }, { string: 5, fret: 0 }, { string: 6, fret: 0 },
+        ],
+        durationSeconds: 90,
+        successThreshold: 0.55,
+      },
+    ],
+    completionMessage: 'Your fingers are navigating the fretboard like a boss. This muscle memory is permanent — it\'ll serve you forever.',
   },
   {
     hour: 4,

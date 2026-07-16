@@ -7,14 +7,29 @@ export interface PitchDetectorState {
   isSupported: boolean;
   currentNote: DetectedNote | null;
   clarity: number;
+  signalLevel: number;
   error: string | null;
   start: () => Promise<void>;
   stop: () => void;
 }
 
-const BUFFER_SIZE = 2048;
-const MIN_CLARITY = 0.85;
-const SAMPLE_RATE = 44100;
+const ANALYSIS_SIZE = 8192;
+const PROCESSOR_SIZE = 4096;
+const MEDIAN_WINDOW = 7;
+const MIN_RMS = 0.003;
+const MIN_CLARITY = 0.80;
+
+function rms(buf: Float32Array): number {
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+  return Math.sqrt(sum / buf.length);
+}
+
+function median(arr: number[]): number {
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
 
 export function usePitchDetector(): PitchDetectorState {
   const [isActive, setIsActive] = useState(false);
@@ -23,23 +38,26 @@ export function usePitchDetector(): PitchDetectorState {
   );
   const [currentNote, setCurrentNote] = useState<DetectedNote | null>(null);
   const [clarity, setClarity] = useState(0);
+  const [signalLevel, setSignalLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
-  const detectorRef = useRef<{ findPitch: (buf: Float32Array, sr: number) => [number, number] } | null>(null);
+  const accumBufRef = useRef(new Float32Array(ANALYSIS_SIZE));
+  const freqHistoryRef = useRef<number[]>([]);
 
   const stop = useCallback(() => {
     processorRef.current?.disconnect();
     processorRef.current = null;
     streamRef.current?.getTracks().forEach(t => t.stop());
     streamRef.current = null;
-    audioCtxRef.current?.close();
+    audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
     setIsActive(false);
     setCurrentNote(null);
     setClarity(0);
+    setSignalLevel(0);
   }, []);
 
   const start = useCallback(async () => {
@@ -47,46 +65,84 @@ export function usePitchDetector(): PitchDetectorState {
     setError(null);
 
     try {
-      // Dynamically import pitchy to avoid SSR issues
       const { PitchDetector } = await import('pitchy');
       const { freqToNote } = await import('@/lib/analysis/noteUtils');
 
-      const detector = PitchDetector.forFloat32Array(BUFFER_SIZE);
-      detectorRef.current = detector;
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      // getUserMedia first to stay inside user-gesture activation window
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        video: false,
+      });
       streamRef.current = stream;
 
-      const audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
+      const audioCtx = new AudioContext();
       audioCtxRef.current = audioCtx;
+      await audioCtx.resume();
 
       const source = audioCtx.createMediaStreamSource(stream);
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = BUFFER_SIZE * 2;
+      const detector = PitchDetector.forFloat32Array(ANALYSIS_SIZE);
 
-      // Use ScriptProcessorNode for broad compatibility
-      const processor = audioCtx.createScriptProcessor(BUFFER_SIZE, 1, 1);
+      const processor = audioCtx.createScriptProcessor(PROCESSOR_SIZE, 1, 1);
       processorRef.current = processor;
 
-      const inputBuffer = new Float32Array(BUFFER_SIZE);
+      let chunksReceived = 0;
+      const accumBuf = accumBufRef.current;
+      const freqHistory = freqHistoryRef.current;
+      freqHistory.length = 0;
 
-      processor.onaudioprocess = () => {
-        analyser.getFloatTimeDomainData(inputBuffer);
-        const [pitch, cl] = detector.findPitch(inputBuffer, audioCtx.sampleRate);
+      processor.onaudioprocess = (e) => {
+        const chunk = e.inputBuffer.getChannelData(0);
+        chunksReceived++;
 
-        if (cl >= MIN_CLARITY && pitch > 60 && pitch < 1500) {
-          const note = freqToNote(pitch);
-          setCurrentNote(note);
-          setClarity(cl);
-        } else {
+        accumBuf.copyWithin(0, PROCESSOR_SIZE);
+        accumBuf.set(chunk, PROCESSOR_SIZE);
+
+        if (chunksReceived < 2) return;
+
+        const currentRms = rms(accumBuf);
+        setSignalLevel(Math.min(1, currentRms / 0.05));
+
+        if (currentRms < MIN_RMS) {
+          setCurrentNote(null);
+          setClarity(0);
+          return;
+        }
+
+        const [rawFreq, cl] = detector.findPitch(accumBuf, audioCtx.sampleRate);
+
+        if (cl < MIN_CLARITY || rawFreq < 70 || rawFreq > 1500) {
           setClarity(cl);
           if (cl < 0.5) setCurrentNote(null);
+          return;
         }
+
+        // Octave-error correction
+        let freq = rawFreq;
+        if (freqHistory.length >= 3) {
+          const med = median(freqHistory);
+          const octaveRatio = freq / med;
+          if (octaveRatio > 1.7 && octaveRatio < 2.3) {
+            freq = freq / 2;
+          } else if (octaveRatio > 0.43 && octaveRatio < 0.58) {
+            freq = freq * 2;
+          }
+        }
+
+        // Median smoothing
+        freqHistoryRef.current = [...freqHistory.slice(-(MEDIAN_WINDOW - 1)), freq];
+        if (freqHistoryRef.current.length < 3) return;
+
+        const smoothFreq = median(freqHistoryRef.current);
+        const note = freqToNote(smoothFreq);
+        setCurrentNote(note);
+        setClarity(cl);
       };
 
-      source.connect(analyser);
-      analyser.connect(processor);
-      processor.connect(audioCtx.destination);
+      source.connect(processor);
+      const silentGain = audioCtx.createGain();
+      silentGain.gain.value = 0;
+      processor.connect(silentGain);
+      silentGain.connect(audioCtx.destination);
 
       setIsActive(true);
     } catch (err) {
@@ -100,5 +156,5 @@ export function usePitchDetector(): PitchDetectorState {
     return () => { stop(); };
   }, [stop]);
 
-  return { isActive, isSupported, currentNote, clarity, error, start, stop };
+  return { isActive, isSupported, currentNote, clarity, signalLevel, error, start, stop };
 }

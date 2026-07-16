@@ -8,7 +8,7 @@ export default function LandingPage() {
   const { hasStarted, elapsed, resetSession } = useSessionStore();
   const totalSeconds = 8 * 60 * 60;
   const progressPct = Math.round((elapsed / totalSeconds) * 100);
-  const currentHour = Math.floor(elapsed / 3600);
+  const currentHour = Math.min(Math.floor(elapsed / 3600), CURRICULUM.length - 1);
 
   return (
     <div className="min-h-screen bg-[#0a0a0b] text-zinc-100 flex flex-col">
@@ -91,8 +91,8 @@ export default function LandingPage() {
               { icon: '🎤', title: 'Mic Feedback', desc: 'Real-time pitch detection (McLeod algorithm) tells you exactly which note you played and how many cents off you are.' },
               { icon: '⏱', title: '8-Hour Timer', desc: 'Countdown timer with pause control. Visual progress rings show exactly where you are in the challenge.' },
               { icon: '🥁', title: 'Smart Metronome', desc: 'Accurate Web Audio clock metronome. Switch between drums-only, instrumental, or full track backing.' },
-              { icon: '🎸', title: '5 Real Songs', desc: "Horse With No Name, Wonderwall, Knockin' on Heaven's Door, Brown Eyed Girl, Leaving on a Jet Plane." },
-              { icon: '⚡', title: 'Side Quests', desc: 'AI analyzes your mistakes and generates personalized 3-5 minute drills targeting your specific weaknesses.' },
+              { icon: '🎸', title: '3 Real Songs', desc: "Seven Nation Army, Rasputin, Pirates of the Caribbean — from iconic riff to full chord progressions." },
+              { icon: '🎯', title: 'Fretboard Game', desc: 'Gamified practice: a string and fret flash on screen — play it correctly to score. Builds muscle memory through reflex.' },
               { icon: '📚', title: '8-Hour Curriculum', desc: 'Research-backed lesson sequence from Justin Guitar + Fender Play methods. Zero to songs in one session.' },
             ].map(f => (
               <div key={f.title} className="p-5 rounded-xl border border-zinc-800 bg-zinc-900/60 hover:border-amber-500/20 transition-all">

@@ -20,12 +20,12 @@ export default function SessionLayout({ children }: { children: ReactNode }) {
             {CURRICULUM.map((lesson, i) => (
               <Link
                 key={i}
-                href={`/session/${lesson.hour}`}
+                href={`/session/${i}`}
                 className="flex-shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs transition-all hover:bg-zinc-800"
               >
                 <span>{lesson.icon}</span>
                 <span className="hidden md:block text-zinc-400">{lesson.title}</span>
-                <span className="md:hidden text-zinc-400">{lesson.hour + 1}</span>
+                <span className="md:hidden text-zinc-400">{i + 1}</span>
               </Link>
             ))}
           </div>
