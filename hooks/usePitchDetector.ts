@@ -87,8 +87,7 @@ export function usePitchDetector(): PitchDetectorState {
 
       let chunksReceived = 0;
       const accumBuf = accumBufRef.current;
-      const freqHistory = freqHistoryRef.current;
-      freqHistory.length = 0;
+      freqHistoryRef.current = [];
 
       processor.onaudioprocess = (e) => {
         const chunk = e.inputBuffer.getChannelData(0);
@@ -116,10 +115,11 @@ export function usePitchDetector(): PitchDetectorState {
           return;
         }
 
-        // Octave-error correction
+        // Octave-error correction — read from ref each time (not a stale closure capture)
+        const history = freqHistoryRef.current;
         let freq = rawFreq;
-        if (freqHistory.length >= 3) {
-          const med = median(freqHistory);
+        if (history.length >= 3) {
+          const med = median(history);
           const octaveRatio = freq / med;
           if (octaveRatio > 1.7 && octaveRatio < 2.3) {
             freq = freq / 2;
@@ -129,7 +129,7 @@ export function usePitchDetector(): PitchDetectorState {
         }
 
         // Median smoothing
-        freqHistoryRef.current = [...freqHistory.slice(-(MEDIAN_WINDOW - 1)), freq];
+        freqHistoryRef.current = [...history.slice(-(MEDIAN_WINDOW - 1)), freq];
         if (freqHistoryRef.current.length < 3) return;
 
         const smoothFreq = median(freqHistoryRef.current);
